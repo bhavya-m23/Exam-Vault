@@ -180,3 +180,27 @@ ExamVault features a deterministic heuristic threat detection engine and persist
   - **Controlled Threat Simulation**: Admin-only sandbox to test real-time brute force, document harvest, and integrity alerts.
 
 
+
+## 🧪 Security Testing & Verification
+
+ExamVault includes automated tests designed to verify its database operations, authentication mechanisms, API behavior, and security controls.
+
+### Test Coverage
+
+* **Database Tests:** Verify database operations and persistent storage behavior.
+* **Authentication Tests:** Check login, token validation, and session revocation.
+* **API Tests:** Validate protected endpoints and expected HTTP responses.
+* **Security Hardening Tests:** Check access control, login rate limiting, and protection against unauthorized requests.
+* **Production Hardening Tests:** Verify account-level login cooldowns and session invalidation.
+
+### Running the Tests
+
+From the backend directory, run:
+
+```bash
+npm test
+```
+
+The test command executes the configured automated test suites.
+
+**Note:** Test results depend on the current implementation and environment. Run the tests locally and review the results before reporting that all tests pass.
