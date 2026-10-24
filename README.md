@@ -204,3 +204,15 @@ npm test
 The test command executes the configured automated test suites.
 
 **Note:** Test results depend on the current implementation and environment. Run the tests locally and review the results before reporting that all tests pass.
+
+## 🗺️ Future Roadmap
+
+ExamVault aims to evolve into a more comprehensive examination document security platform.
+
+* **Enhanced Monitoring:** Improve security event correlation and incident investigation workflows.
+* **Document Lifecycle:** Strengthen document versioning, integrity verification, and controlled restoration.
+* **Automated Testing:** Expand regression tests for authentication, authorization, and document security.
+* **Deployment Readiness:** Document secure environment configuration, deployment requirements, and operational monitoring.
+* **Developer Experience:** Improve setup instructions and troubleshooting documentation.
+
+*These items represent potential improvements and should not be interpreted as completed features unless verified in the implementation.*
