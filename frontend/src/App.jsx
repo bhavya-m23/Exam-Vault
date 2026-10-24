@@ -13,8 +13,19 @@ import SecurityActivity from './pages/SecurityActivity';
 import AuditLogs from './pages/AuditLogs';
 
 const ProtectedLayout = ({ children }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, loading } = useAuth();
   const location = useLocation();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-navy-950 flex items-center justify-center text-cyan-400 font-mono text-xs">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+          <span className="tracking-wider uppercase">Authenticating Vault Session...</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return <Navigate to="/login" replace state={{ from: location }} />;

@@ -12,6 +12,7 @@ export const StatusBadge = ({ status }) => {
     case 'PROTECTED':
     case 'ACTIVE':
     case 'INTEGRITY_VERIFIED':
+    case 'RESOLVED':
       return (
         <span className="badge badge-allowed">
           <CheckCircle2 size={12} />
@@ -20,8 +21,11 @@ export const StatusBadge = ({ status }) => {
       );
 
     case 'BLOCKED':
+    case 'DENIED':
+    case 'FAILED':
     case 'INTEGRITY_COMPROMISED':
     case 'UNAUTHORIZED':
+    case 'OPEN':
       return (
         <span className="badge badge-blocked">
           <XCircle size={12} />
@@ -32,6 +36,7 @@ export const StatusBadge = ({ status }) => {
     case 'WARNING':
     case 'MEDIUM':
     case 'SUSPICIOUS':
+    case 'INVESTIGATING':
       return (
         <span className="badge badge-warning">
           <AlertTriangle size={12} />
@@ -50,7 +55,9 @@ export const StatusBadge = ({ status }) => {
 
     case 'LOW':
     case 'REVIEWED':
-    case 'RESOLVED':
+    case 'FALSE POSITIVE':
+    case 'FALSE_POSITIVE':
+    case 'INFO':
       return (
         <span className="badge badge-info">
           <ShieldCheck size={12} />

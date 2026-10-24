@@ -1,22 +1,123 @@
 const express = require('express');
 const router = express.Router();
-const { documents, accessPolicies, auditLogs, addAuditLog, addSecurityEvent } = require('../data/store');
-const { generateFingerprint } = require('../utils/fingerprint');
+const multer = require('multer');
+const {
+  getDocuments,
+  getDocumentById,
+  addDocument,
+  verifyDocument,
+  tamperDocument,
+  restoreDocument,
+  getPolicyByDocumentId,
+  getAuditLogs,
+  addAuditLog,
+  addSecurityEvent,
+  getDocumentBinary
+} = require('../data/store');
+const { authenticateToken } = require('../middleware/auth');
+const { requireRole } = require('../middleware/rbac');
+const storage = require('../utils/storage');
+const { MAX_UPLOAD_SIZE_BYTES } = require('../config');
 
-// GET /api/documents
-router.get('/', (req, res) => {
-  res.json(documents);
+// In-memory multer storage so validation occurs prior to persistent disk write
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_UPLOAD_SIZE_BYTES
+  }
 });
 
-// GET /api/documents/:id
+// Middleware wrapper to handle file size and multipart errors safely
+function handleUploadMiddleware(req, res, next) {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          message: `File upload exceeds the maximum allowed size of ${storage.formatFileSize(MAX_UPLOAD_SIZE_BYTES)}.`
+        });
+      }
+      return res.status(400).json({
+        message: err.message || 'File upload parsing error.'
+      });
+    }
+    next();
+  });
+}
+
+// All document vault routes require authentication
+router.use(authenticateToken);
+
+// GET /api/documents - Safe metadata listing (omits raw content)
+router.get('/', (req, res) => {
+  res.json(getDocuments());
+});
+
+// GET /api/documents/:id - Object-level authorization enforced
 router.get('/:id', (req, res) => {
-  const doc = documents.find(d => d.id === req.params.id);
+  const doc = getDocumentById(req.params.id);
   if (!doc) {
     return res.status(404).json({ message: 'Document not found' });
   }
 
-  const policy = accessPolicies.find(p => p.documentId === doc.id);
-  const docAuditLogs = auditLogs.filter(a => a.documentId === doc.id || a.document === doc.name);
+  const policy = getPolicyByDocumentId(doc.id);
+  const userRole = req.user.role;
+  const clientIp = req.ip || '127.0.0.1';
+
+  // 1. Policy Authorization Check
+  const isRoleAllowed = userRole === 'Administrator' || (policy && policy.allowedRoles && policy.allowedRoles.includes(userRole));
+
+  // 2. Tamper check: Only Administrator and Exam Coordinator can access tampered documents for investigation/restoration
+  const isTamperAllowed = !doc.isTampered || userRole === 'Administrator' || userRole === 'Exam Coordinator';
+
+  if (!isRoleAllowed || !isTamperAllowed) {
+    const reason = !isRoleAllowed
+      ? `Role '${userRole}' is not authorized to access document '${doc.name}'. Permitted: [${policy ? policy.allowedRoles.join(', ') : 'None'}]`
+      : `Access blocked: Document '${doc.name}' integrity is compromised.`;
+
+    addAuditLog({
+      user: req.user.name,
+      userRole,
+      action: 'DOCUMENT_VIEW',
+      document: doc.name,
+      documentId: doc.id,
+      purpose: req.query.purpose || 'Document Access',
+      result: 'BLOCKED',
+      reason,
+      ip: clientIp
+    });
+
+    addSecurityEvent({
+      severity: doc.sensitivity === 'Critical' ? 'CRITICAL' : 'HIGH',
+      type: 'UNAUTHORIZED_ACCESS',
+      user: req.user.name,
+      userRole,
+      document: doc.name,
+      documentId: doc.id,
+      message: reason,
+      ip: clientIp
+    });
+
+    return res.status(403).json({
+      message: `Access forbidden: ${reason}`,
+      allowed: false
+    });
+  }
+
+  // Access Granted - log audit trail
+  addAuditLog({
+    user: req.user.name,
+    userRole,
+    action: 'DOCUMENT_VIEW',
+    document: doc.name,
+    documentId: doc.id,
+    purpose: req.query.purpose || (policy ? policy.purpose : 'Document Inspection'),
+    result: 'ALLOWED',
+    reason: `Document retrieved under policy ${policy ? policy.id : 'ADMIN_DIRECT'}`,
+    ip: clientIp
+  });
+
+  const allLogs = getAuditLogs();
+  const docAuditLogs = allLogs.filter(a => a.documentId === doc.id || a.document === doc.name);
 
   res.json({
     document: doc,
@@ -25,63 +126,171 @@ router.get('/:id', (req, res) => {
   });
 });
 
-// POST /api/documents - Simulate Document Upload
-router.post('/', (req, res) => {
-  const { name, subject, owner, ownerRole, sensitivity, content, fileSize } = req.body;
-
-  if (!name || !subject || !owner) {
-    return res.status(400).json({ message: 'Name, Subject, and Owner are required' });
+// GET /api/documents/:id/download - Secure Document Binary Download
+router.get('/:id/download', (req, res) => {
+  const doc = getDocumentById(req.params.id);
+  if (!doc) {
+    return res.status(404).json({ message: 'Document not found' });
   }
 
-  const id = `DOC-00${documents.length + 1}`.replace(/00(\d{3,})/, '$1');
-  const uploadedAt = new Date().toISOString();
-  const docContent = content || `SECURE EXAM CONTENT FOR ${name.toUpperCase()} (ID: ${id}). Subject: ${subject}. Sealed at ${uploadedAt}`;
-  const fingerprint = generateFingerprint(docContent);
+  const policy = getPolicyByDocumentId(doc.id);
+  const userRole = req.user.role;
+  const clientIp = req.ip || '127.0.0.1';
 
-  const newDoc = {
-    id,
+  // 1. Role & Policy Authorization Check for DOWNLOAD action
+  const isRoleAllowed = userRole === 'Administrator' || (
+    policy &&
+    policy.allowedRoles &&
+    policy.allowedRoles.includes(userRole) &&
+    policy.allowedActions &&
+    policy.allowedActions.includes('DOWNLOAD')
+  );
+
+  // 2. Tamper check: Only Administrator and Exam Coordinator can download tampered documents for investigation
+  const isTamperAllowed = !doc.isTampered || userRole === 'Administrator' || userRole === 'Exam Coordinator';
+
+  if (!isRoleAllowed || !isTamperAllowed) {
+    const reason = !isRoleAllowed
+      ? `Role '${userRole}' is not authorized to download document '${doc.name}'. Permitted: [${policy ? policy.allowedRoles.join(', ') : 'None'}]`
+      : `Download blocked: Document '${doc.name}' integrity is compromised.`;
+
+    addAuditLog({
+      user: req.user.name,
+      userRole,
+      action: 'DOCUMENT_DOWNLOAD',
+      document: doc.name,
+      documentId: doc.id,
+      purpose: req.query.purpose || 'Document Download',
+      result: 'BLOCKED',
+      reason,
+      ip: clientIp
+    });
+
+    addSecurityEvent({
+      severity: doc.sensitivity === 'Critical' ? 'CRITICAL' : 'HIGH',
+      type: 'UNAUTHORIZED_DOWNLOAD',
+      user: req.user.name,
+      userRole,
+      document: doc.name,
+      documentId: doc.id,
+      message: reason,
+      ip: clientIp
+    });
+
+    return res.status(403).json({
+      message: `Access forbidden: ${reason}`,
+      allowed: false
+    });
+  }
+
+  // 3. Retrieve binary payload safely
+  const binaryResult = getDocumentBinary(doc.id);
+  if (!binaryResult || binaryResult.missing) {
+    addAuditLog({
+      user: req.user.name,
+      userRole,
+      action: 'DOCUMENT_DOWNLOAD',
+      document: doc.name,
+      documentId: doc.id,
+      purpose: 'Document Retrieval',
+      result: 'ERROR',
+      reason: 'Stored document binary file is missing from secure storage',
+      ip: clientIp
+    });
+
+    return res.status(404).json({
+      message: 'Document file content is missing from secure storage.'
+    });
+  }
+
+  // 4. Log successful download audit entry
+  addAuditLog({
+    user: req.user.name,
+    userRole,
+    action: 'DOCUMENT_DOWNLOAD',
+    document: doc.name,
+    documentId: doc.id,
+    purpose: req.query.purpose || 'Document Download',
+    result: 'ALLOWED',
+    reason: `Document downloaded securely under policy ${policy ? policy.id : 'ADMIN_DIRECT'}`,
+    ip: clientIp
+  });
+
+  // 5. Stream binary with sanitized headers and safe Content-Disposition
+  const safeFilename = storage.sanitizeFilename(binaryResult.filename);
+  res.setHeader('Content-Type', binaryResult.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
+  res.setHeader('Content-Length', binaryResult.buffer.length);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  res.send(binaryResult.buffer);
+});
+
+// POST /api/documents - Upload document (Administrator, Exam Coordinator, Course Instructor)
+router.post('/', requireRole('Administrator', 'Exam Coordinator', 'Course Instructor'), handleUploadMiddleware, (req, res) => {
+  const owner = req.user.name;
+  const ownerRole = req.user.role;
+
+  // Case 1: Binary Multipart File Upload
+  if (req.file) {
+    let savedFile;
+    try {
+      savedFile = storage.saveFile({
+        buffer: req.file.buffer,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype
+      });
+    } catch (err) {
+      return res.status(err.status || 400).json({
+        message: err.message || 'File validation failed.'
+      });
+    }
+
+    const docName = (req.body && req.body.name ? req.body.name.trim() : '') || savedFile.originalFileName;
+    const subject = (req.body && req.body.subject ? req.body.subject.trim() : '') || 'General Examination';
+    const sensitivity = (req.body && req.body.sensitivity) || 'High';
+
+    try {
+      const { document: newDoc, policy: defaultPolicy } = addDocument({
+        name: docName,
+        subject,
+        owner,
+        ownerRole,
+        sensitivity,
+        fileSize: savedFile.fileSize,
+        storageKey: savedFile.storageKey,
+        mimeType: savedFile.mimeType,
+        originalFileName: savedFile.originalFileName,
+        buffer: req.file.buffer
+      });
+
+      return res.status(201).json({
+        message: "Document secured successfully. Integrity fingerprint created.",
+        document: newDoc,
+        policy: defaultPolicy
+      });
+    } catch (err) {
+      // Clean up orphaned stored file if database transaction fails
+      storage.deleteFile(savedFile.storageKey);
+      throw err;
+    }
+  }
+
+  // Case 2: JSON Body Text Simulation (Backward Compatibility for Seeded/API Tests)
+  const { name, subject, sensitivity, content, fileSize } = req.body || {};
+
+  if (!name || !subject) {
+    return res.status(400).json({ message: 'Name and Subject are required' });
+  }
+
+  const { document: newDoc, policy: defaultPolicy } = addDocument({
     name,
     subject,
     owner,
-    ownerRole: ownerRole || "Exam Coordinator",
-    uploadedAt,
-    version: 1,
-    content: docContent,
-    fingerprint,
-    originalFingerprint: fingerprint,
-    status: "Protected",
-    sensitivity: sensitivity || "High",
-    fileSize: fileSize || "2.0 MB",
-    isTampered: false
-  };
-
-  documents.unshift(newDoc);
-
-  // Automatically create a default policy for new document
-  const defaultPolicy = {
-    id: `POL-00${accessPolicies.length + 1}`.replace(/00(\d{3,})/, '$1'),
-    documentId: id,
-    documentName: name,
-    allowedRoles: [ownerRole || "Exam Coordinator", "Administrator"],
-    allowedActions: ["VIEW", "DOWNLOAD"],
-    purpose: "Exam Preparation",
-    startTime: "08:00",
-    endTime: "20:00",
-    status: "Active",
-    createdAt: uploadedAt
-  };
-  accessPolicies.unshift(defaultPolicy);
-
-  // Add audit log
-  addAuditLog({
-    user: owner,
-    userRole: ownerRole || "Exam Coordinator",
-    action: "DOCUMENT_UPLOAD",
-    document: name,
-    documentId: id,
-    purpose: "Exam Creation & Archival",
-    result: "ALLOWED",
-    reason: `Document uploaded and SHA-256 fingerprint generated (${fingerprint.substring(0, 8)}...)`
+    ownerRole,
+    sensitivity,
+    content,
+    fileSize
   });
 
   res.status(201).json({
@@ -93,123 +302,48 @@ router.post('/', (req, res) => {
 
 // POST /api/documents/:id/verify - Verify Document Integrity
 router.post('/:id/verify', (req, res) => {
-  const doc = documents.find(d => d.id === req.params.id);
-  if (!doc) {
+  const result = verifyDocument(
+    req.params.id,
+    req.user.name,
+    req.user.role
+  );
+
+  if (!result) {
     return res.status(404).json({ message: 'Document not found' });
-  }
-
-  const calculatedFingerprint = generateFingerprint(doc.content);
-  const isMatch = calculatedFingerprint === doc.originalFingerprint;
-
-  const result = {
-    verified: isMatch,
-    documentId: doc.id,
-    documentName: doc.name,
-    recordedFingerprint: doc.originalFingerprint,
-    currentFingerprint: calculatedFingerprint,
-    status: isMatch ? "INTEGRITY_VERIFIED" : "INTEGRITY_COMPROMISED",
-    message: isMatch
-      ? "Integrity Verified. Recorded fingerprint matches current fingerprint."
-      : "INTEGRITY WARNING: Document fingerprint does not match the recorded version."
-  };
-
-  // Add audit log
-  addAuditLog({
-    user: req.body.user || "Current User",
-    userRole: req.body.userRole || "Administrator",
-    action: "INTEGRITY_VERIFICATION",
-    document: doc.name,
-    documentId: doc.id,
-    purpose: "Integrity Audit",
-    result: isMatch ? "ALLOWED" : "WARNING",
-    reason: result.message
-  });
-
-  if (!isMatch) {
-    addSecurityEvent({
-      severity: "CRITICAL",
-      type: "INTEGRITY_MISMATCH",
-      user: req.body.user || "System Auditor",
-      userRole: req.body.userRole || "Administrator",
-      document: doc.name,
-      documentId: doc.id,
-      message: `Fingerprint mismatch detected! Recorded: ${doc.originalFingerprint.substring(0, 10)}... Current: ${calculatedFingerprint.substring(0, 10)}...`
-    });
   }
 
   res.json(result);
 });
 
-// POST /api/documents/:id/tamper - Simulate Tampering (Hackathon Demo Feature)
-router.post('/:id/tamper', (req, res) => {
-  const doc = documents.find(d => d.id === req.params.id);
-  if (!doc) {
+// POST /api/documents/:id/tamper - Simulate Tampering (Administrator, Exam Coordinator only)
+router.post('/:id/tamper', requireRole('Administrator', 'Exam Coordinator'), (req, res) => {
+  const result = tamperDocument(req.params.id);
+
+  if (!result) {
     return res.status(404).json({ message: 'Document not found' });
   }
-
-  // Mutate content artificially to corrupt fingerprint
-  doc.content += " [UNAUTHORIZED ALTERATION ADDED BY TAMPER SIMULATION]";
-  doc.fingerprint = generateFingerprint(doc.content);
-  doc.isTampered = true;
-  doc.status = "Integrity Compromised";
-
-  const securityEvent = addSecurityEvent({
-    severity: "CRITICAL",
-    type: "UNAUTHORIZED_MODIFICATION",
-    user: "UNKNOWN_INTRUDER",
-    userRole: "Attacker",
-    document: doc.name,
-    documentId: doc.id,
-    message: "Document payload modified! SHA-256 fingerprint integrity compromised."
-  });
-
-  addAuditLog({
-    user: "System Integrity Monitor",
-    userRole: "Automated System",
-    action: "TAMPER_DETECTED",
-    document: doc.name,
-    documentId: doc.id,
-    purpose: "Intrusion Detection",
-    result: "WARNING",
-    reason: `Document fingerprint altered from ${doc.originalFingerprint.substring(0, 8)}... to ${doc.fingerprint.substring(0, 8)}...`
-  });
 
   res.json({
     message: "Tampering simulated. Document fingerprint modified.",
-    document: doc,
-    securityEvent
+    document: result.document,
+    securityEvent: result.securityEvent
   });
 });
 
-// POST /api/documents/:id/restore - Restore Tampered Document
-router.post('/:id/restore', (req, res) => {
-  const doc = documents.find(d => d.id === req.params.id);
-  if (!doc) {
+// POST /api/documents/:id/restore - Restore Tampered Document (Administrator, Exam Coordinator only)
+router.post('/:id/restore', requireRole('Administrator', 'Exam Coordinator'), (req, res) => {
+  const restoredDoc = restoreDocument(
+    req.params.id,
+    req.user.name
+  );
+
+  if (!restoredDoc) {
     return res.status(404).json({ message: 'Document not found' });
   }
 
-  // Restore content and original fingerprint
-  if (doc.content.includes(" [UNAUTHORIZED ALTERATION ADDED BY TAMPER SIMULATION]")) {
-    doc.content = doc.content.replace(" [UNAUTHORIZED ALTERATION ADDED BY TAMPER SIMULATION]", "");
-  }
-  doc.fingerprint = doc.originalFingerprint;
-  doc.isTampered = false;
-  doc.status = "Protected";
-
-  addAuditLog({
-    user: req.body.user || "Administrator",
-    userRole: "Administrator",
-    action: "DOCUMENT_RESTORE",
-    document: doc.name,
-    documentId: doc.id,
-    purpose: "Remediation",
-    result: "ALLOWED",
-    reason: "Document fingerprint restored to verified state from secure backup."
-  });
-
   res.json({
     message: "Document restored to pristine state.",
-    document: doc
+    document: restoredDoc
   });
 });
 

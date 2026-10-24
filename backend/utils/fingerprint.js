@@ -6,6 +6,9 @@ const crypto = require('crypto');
  * @returns {string} SHA-256 hex string
  */
 function generateFingerprint(content) {
+  if (Buffer.isBuffer(content)) {
+    return crypto.createHash('sha256').update(content).digest('hex');
+  }
   const data = typeof content === 'object' ? JSON.stringify(content) : String(content);
   return crypto.createHash('sha256').update(data).digest('hex');
 }

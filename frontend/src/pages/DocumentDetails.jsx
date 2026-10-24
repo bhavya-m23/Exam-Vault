@@ -14,7 +14,8 @@ import {
   ArrowLeft,
   Activity,
   Flame,
-  RotateCcw
+  RotateCcw,
+  Download
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -30,6 +31,41 @@ export const DocumentDetails = () => {
 
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [integrityState, setIntegrityState] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownloadDocument = async () => {
+    setDownloading(true);
+    try {
+      const res = await fetch(`/api/documents/${id}/download`);
+      if (res.ok) {
+        const disposition = res.headers.get('content-disposition');
+        let filename = document.name;
+        if (disposition) {
+          const match = disposition.match(/filename="?([^"]+)"?/);
+          if (match && match[1]) filename = match[1];
+        }
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = window.document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        window.document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        window.document.body.removeChild(a);
+
+        showToast(`✓ Download completed: ${filename}`, 'success');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.message || 'Download forbidden or document compromised.', 'danger');
+      }
+    } catch (err) {
+      showToast('Network error during download', 'danger');
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const fetchDocumentDetails = async () => {
     try {
@@ -146,6 +182,14 @@ export const DocumentDetails = () => {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={handleDownloadDocument}
+              disabled={downloading}
+              className="vault-btn vault-btn-secondary text-xs flex items-center gap-1.5"
+            >
+              <Download size={14} className="text-cyan-400" />
+              {downloading ? 'Downloading...' : 'Download Document'}
+            </button>
+            <button
               onClick={() => setIsRequestModalOpen(true)}
               className="vault-btn vault-btn-primary text-xs"
             >
@@ -243,6 +287,15 @@ export const DocumentDetails = () => {
 
             {/* Verification & Hackathon Simulation Buttons */}
             <div className="space-y-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={handleDownloadDocument}
+                disabled={downloading}
+                className="vault-btn vault-btn-secondary w-full text-xs flex items-center justify-center gap-1.5"
+              >
+                <Download size={15} className="text-cyan-400" />
+                {downloading ? 'Downloading Document...' : 'Download Secure Document'}
+              </button>
+
               <button
                 onClick={handleVerifyIntegrity}
                 className="vault-btn vault-btn-success w-full text-xs"

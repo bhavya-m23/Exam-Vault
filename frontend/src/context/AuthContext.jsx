@@ -41,11 +41,8 @@ export const initialUsers = [
 ];
 
 export const AuthProvider = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState(() => {
-    const saved = localStorage.getItem('examvault_user');
-    return saved ? JSON.parse(saved) : initialUsers[1]; // Default to Dr. Priya Sharma (Exam Coordinator)
-  });
-
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
 
   const showToast = (message, type = 'info') => {
@@ -56,37 +53,156 @@ export const AuthProvider = ({ children }) => {
     setToast(null);
   };
 
-  const login = (email, password) => {
-    const user = initialUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (user || (email === 'admin@examvault.local' && password === 'admin123')) {
-      const active = user || initialUsers[0];
-      setCurrentUser(active);
-      localStorage.setItem('examvault_user', JSON.stringify(active));
-      showToast(`Welcome back, ${active.name} (${active.role})`, 'success');
-      return true;
+  // Set up global fetch interceptor to handle credentials, CSRF header, and 401 session expiration
+  useEffect(() => {
+    const originalFetch = window.fetch;
+
+    window.fetch = async (...args) => {
+      let [resource, config = {}] = args;
+      const headers = {
+        'X-Requested-With': 'XMLHttpRequest',
+        ...(config.headers || {})
+      };
+
+      const updatedConfig = {
+        ...config,
+        credentials: config.credentials || 'include',
+        headers
+      };
+
+      const response = await originalFetch(resource, updatedConfig);
+
+      // Mid-session expiration handler (ignore login endpoint which returns 401 for invalid credentials)
+      if (response.status === 401) {
+        const urlStr = typeof resource === 'string' ? resource : (resource && resource.url ? resource.url : '');
+        if (urlStr && !urlStr.includes('/api/auth/login')) {
+          setCurrentUser((prev) => {
+            if (prev !== null) {
+              showToast('Your session has expired or been invalidated. Please sign in again.', 'danger');
+            }
+            return null;
+          });
+        }
+      }
+
+      return response;
+    };
+
+    return () => {
+      window.fetch = originalFetch;
+    };
+  }, []);
+
+  // Verify active server session on initial load
+  useEffect(() => {
+    let isMounted = true;
+
+    async function checkAuth() {
+      try {
+        const res = await fetch('/api/auth/me', {
+          credentials: 'include'
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) {
+            setCurrentUser(data.user);
+          }
+        } else {
+          if (isMounted) {
+            setCurrentUser(null);
+          }
+        }
+      } catch (err) {
+        if (isMounted) {
+          setCurrentUser(null);
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
     }
-    showToast('Invalid credentials. Use demo account admin@examvault.local / admin123', 'danger');
-    return false;
+
+    checkAuth();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const login = async (email, password) => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ email, password })
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.user) {
+        setCurrentUser(data.user);
+        showToast(data.message || `Welcome back, ${data.user.name} (${data.user.role})`, 'success');
+        return true;
+      } else {
+        showToast(data.message || 'Invalid email or password.', 'danger');
+        return false;
+      }
+    } catch (err) {
+      showToast('Authentication service connection failure.', 'danger');
+      return false;
+    }
   };
 
-  const switchUser = (userId) => {
-    const user = initialUsers.find(u => u.id === userId);
-    if (user) {
-      setCurrentUser(user);
-      localStorage.setItem('examvault_user', JSON.stringify(user));
-      showToast(`Switched active context to: ${user.name} (${user.role})`, 'info');
+  const switchUser = async (userId) => {
+    try {
+      const res = await fetch('/api/auth/switch-demo', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ userId })
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.user) {
+        setCurrentUser(data.user);
+        showToast(data.message || `Switched active context to: ${data.user.name} (${data.user.role})`, 'info');
+        return true;
+      } else {
+        showToast(data.message || 'Failed to switch demo persona.', 'danger');
+        return false;
+      }
+    } catch (err) {
+      showToast('Error switching demo persona.', 'danger');
+      return false;
     }
   };
 
-  const logout = () => {
-    setCurrentUser(null);
-    localStorage.removeItem('examvault_user');
-    showToast('Signed out of ExamVault', 'info');
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include'
+      });
+    } catch (err) {
+      // Ignore network errors on logout
+    } finally {
+      setCurrentUser(null);
+      showToast('Signed out of ExamVault', 'info');
+    }
   };
 
   return (
     <AuthContext.Provider value={{
       currentUser,
+      loading,
       users: initialUsers,
       login,
       switchUser,

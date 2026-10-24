@@ -8,19 +8,32 @@ export const Login = () => {
   const { login } = useAuth();
   const [email, setEmail] = useState('admin@examvault.local');
   const [password, setPassword] = useState('admin123');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (login(email, password)) {
-      navigate('/');
+    setSubmitting(true);
+    try {
+      const success = await login(email, password);
+      if (success) {
+        navigate('/');
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const handleQuickLogin = (demoEmail) => {
+  const handleQuickLogin = async (demoEmail) => {
     setEmail(demoEmail);
     setPassword('admin123');
-    if (login(demoEmail, 'admin123')) {
-      navigate('/');
+    setSubmitting(true);
+    try {
+      const success = await login(demoEmail, 'admin123');
+      if (success) {
+        navigate('/');
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -77,9 +90,10 @@ export const Login = () => {
 
           <button
             type="submit"
-            className="vault-btn vault-btn-primary w-full py-3 mt-2 flex items-center justify-center gap-2 text-sm font-bold"
+            disabled={submitting}
+            className="vault-btn vault-btn-primary w-full py-3 mt-2 flex items-center justify-center gap-2 text-sm font-bold disabled:opacity-50"
           >
-            <span>Sign In to Vault</span>
+            <span>{submitting ? 'Authenticating...' : 'Sign In to Vault'}</span>
             <ArrowRight size={16} />
           </button>
         </form>

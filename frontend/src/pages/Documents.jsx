@@ -13,7 +13,8 @@ import {
   CheckCircle2, 
   KeyRound,
   Zap,
-  AlertTriangle
+  AlertTriangle,
+  Download
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -57,6 +58,38 @@ export const Documents = () => {
       fetchDocuments();
     } catch (err) {
       showToast('Error verifying integrity', 'danger');
+    }
+  };
+
+  const handleDownload = async (doc, e) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/download`);
+      if (res.ok) {
+        const disposition = res.headers.get('content-disposition');
+        let filename = doc.name;
+        if (disposition) {
+          const match = disposition.match(/filename="?([^"]+)"?/);
+          if (match && match[1]) filename = match[1];
+        }
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = window.document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        window.document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        window.document.body.removeChild(a);
+
+        showToast(`✓ Downloaded ${filename}`, 'success');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.message || 'Download forbidden or document compromised.', 'danger');
+      }
+    } catch (err) {
+      showToast('Download failed: connection error', 'danger');
     }
   };
 
@@ -140,6 +173,14 @@ export const Documents = () => {
             title="Verify SHA-256 Integrity"
           >
             <CheckCircle2 size={15} />
+          </button>
+
+          <button
+            onClick={(e) => handleDownload(row, e)}
+            className="p-1.5 bg-slate-900 hover:bg-slate-800 text-cyan-400 hover:text-cyan-300 rounded border border-slate-800 transition-colors"
+            title="Download Document"
+          >
+            <Download size={15} />
           </button>
         </div>
       )
